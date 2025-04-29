@@ -1,5 +1,3 @@
-#!/usr/bin/python3
-#-*- coding:utf-8 -*-
 
 import scapy.all as scapy
 import binascii
@@ -15,81 +13,82 @@ import random
 
 random.seed(40)
 
-pcap_dir = "I:\\dataset\\"
-tls_date = [20210301,20210808]
-pcap_name = "app_A.pcap"
-#pcap_name = "merge.pcap"
+pcap_dir = "/mnt/i/ET-BERT/datasets/CSTNET-TLS1.3/"
+# Remove the date-based processing since files are organized by domain
+# tls_date = [20210301,20210808]
+pcap_name = ".pcap"  # Changed to match partial name
 
-word_dir = "I:/corpora/"
-word_name = "encrypted_tls13_burst.txt"
+word_dir = "./corpora/"
+word_name = "encrypted_burst.txt"
 
-vocab_dir = "I:/models/"
+vocab_dir = "./models/"
 vocab_name = "encryptd_vocab_all.txt"
 
 def pcap_preprocess():
-    
-    start_date = tls_date[0]
-    end_date = tls_date[1]
     packet_num = 0
-    while start_date <= end_date:
-        data_dir = tls13_pcap_dir + str(start_date) + "\\"
-        p_num = preprocess(data_dir)
-        packet_num += p_num
-        start_date += 1
-    print("used packets %d"%packet_num)
-    print("finish generating tls13 pretrain dataset.\n please check in %s"%word_dir)
+    # Process all subdirectories
+    for domain_dir in os.listdir(pcap_dir):
+        if os.path.isdir(os.path.join(pcap_dir, domain_dir)):
+            data_dir = os.path.join(pcap_dir, domain_dir)
+            p_num = preprocess(data_dir)
+            packet_num += p_num
+    
+    print("used packets %d" % packet_num)
+    print("finish generating tls13 pretrain dataset.\n please check in %s" % word_dir)
     return 0
 
 def preprocess(pcap_dir):
-    print("now pre-process pcap_dir is %s"%pcap_dir)
+    print("now pre-process pcap_dir is %s" % pcap_dir)
     
     packet_num = 0
     n = 0
     
-    for parent,dirs,files in os.walk(pcap_dir):
+    for parent, dirs, files in os.walk(pcap_dir):
         for file in files:
-            if "pcapng" not in file and tls13_name in file:
+            if file.endswith(pcap_name):  # Changed to check for .pcap extension
                 n += 1
-                pcap_name = parent + "\\" + file
-                print("No.%d pacp is processed ... %s ..."%(n,file))
-                packets = scapy.rdpcap(pcap_name)
-                #word_packet = b''
-                words_txt = []
+                pcap_path = os.path.join(parent, file)
+                print("No.%d pcap is processed ... %s ..." % (n, file))
+                try:
+                    packets = scapy.rdpcap(pcap_path)
+                    words_txt = []
 
-                for p in packets:
-                    packet_num += 1
-                    word_packet = p.copy()
-                    words = (binascii.hexlify(bytes(word_packet)))
-                    
-                    words_string = words.decode()[76:]
-                    # print(words_string)
-                    length = len(words_string)
-                    if length < 10:
-                        continue
-                    for string_txt in cut(words_string, int(length / 2)):
-                        token_count = 0 
-                        sentence = cut(string_txt,1)  
-                        for sub_string_index in range(len(sentence)):
-                            if sub_string_index != (len(sentence) - 1):
-                                token_count += 1
-                                if token_count > 256:
-                                    break
+                    for p in packets:
+                        packet_num += 1
+                        word_packet = p.copy()
+                        words = (binascii.hexlify(bytes(word_packet)))
+                        
+                        words_string = words.decode()[76:]
+                        length = len(words_string)
+                        if length < 10:
+                            continue
+                        for string_txt in cut(words_string, int(length / 2)):
+                            token_count = 0 
+                            sentence = cut(string_txt, 1)  
+                            for sub_string_index in range(len(sentence)):
+                                if sub_string_index != (len(sentence) - 1):
+                                    token_count += 1
+                                    if token_count > 256:
+                                        break
+                                    else:
+                                        merge_word_bigram = sentence[sub_string_index] + sentence[
+                                                                     sub_string_index + 1]  
                                 else:
-                                    merge_word_bigram = sentence[sub_string_index] + sentence[
-                                                                 sub_string_index + 1]  
-                            else:
-                                break  
-                            words_txt.append(merge_word_bigram)
-                            words_txt.append(' ')
+                                    break  
+                                words_txt.append(merge_word_bigram)
+                                words_txt.append(' ')
+                            words_txt.append("\n")
                         words_txt.append("\n")
-                    words_txt.append("\n")
 
-                
-                result_file = open(word_dir + word_name, 'a')
-                for words in words_txt:
-                    result_file.write(words)
-                result_file.close()
-    print("finish preprocessing %d pcaps"%n)
+                    # Write results for this pcap
+                    with open(word_dir + word_name, 'a') as result_file:
+                        for words in words_txt:
+                            result_file.write(words)
+                except Exception as e:
+                    print(f"Error processing {file}: {str(e)}")
+                    continue
+                    
+    print("finish preprocessing %d pcaps" % n)
     return packet_num
 
 def cut(obj, sec):
@@ -198,13 +197,19 @@ def read_pcap_flow(pcap_file):
     return flow_data_string
 
 def split_cap(pcap_file,pcap_name):
-    cmd = "I:\\SplitCap.exe -r %s -s session -o I:\\split_pcaps\\" + pcap_name
+    cmd = "SplitCap.exe -r %s -s session -o split_pcaps" + pcap_name
     command = cmd%pcap_file
     os.system(command)
     return 0
 
 if __name__ == '__main__':
-    #preprocess(pcap_dir)
-    # build vocab
+    # First create directories if they don't exist
+    os.makedirs(word_dir, exist_ok=True)
+    os.makedirs(vocab_dir, exist_ok=True)
+    
+    # First preprocess the pcap files to create the training data
+    pcap_preprocess()
+    
+    # Then build vocab
     build_BPE()
     build_vocab()
