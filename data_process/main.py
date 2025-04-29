@@ -21,36 +21,105 @@ import dataset_generation
 import data_preprocess
 import open_dataset_deal
 
-_category = 120 # dataset class
-dataset_dir = "I:\\datasets\\" # the path to save dataset for dine-tuning
+# Base path configuration
+BASE_PATH = "/mnt/i/ET-BERT"
+DATASET_NAME = "CSTNet-TLS1.3"  # Current dataset name
 
-pcap_path, dataset_save_path, samples, features, dataset_level = "I:\\cstnet-tls1.3\\packet\\splitcap\\", "I:\\cstnet-tls1.3\\packet\\result\\", [5000], ["payload"], "packet"
+# Dataset configurations
+_category = 120  # dataset class
 
-def dataset_extract(model):
+# Dataset specific paths
+DATASET_BASE = os.path.join(BASE_PATH, "datasets", DATASET_NAME)
+DATASETS_DIR = DATASET_BASE  # the path to save dataset for fine-tuning
+PCAP_PATH = os.path.join(DATASET_BASE, "splitcap")  # 修改为 splitcap 目录
+DATASET_SAVE_PATH = os.path.join(DATASET_BASE, "results")  # 结果保存目录
+IF_SPLIT_PCAP = False
+
+# Default configurations
+DEFAULT_SAMPLES = [10]  # 减小默认样本数，避免采样错误
+DEFAULT_FEATURES = ["payload"]
+DEFAULT_DATASET_LEVEL = "packet"
+
+def ensure_directories():
+    """Ensure all necessary directories exist"""
+    directories = [
+        PCAP_PATH,
+        DATASET_SAVE_PATH,
+        os.path.join(DATASET_SAVE_PATH, "dataset")
+    ]
     
+    for directory in directories:
+        os.makedirs(directory, exist_ok=True)
+        print(f"Ensured directory exists: {directory}")
+
+def check_pcap_files(directory):
+    """Check if directory contains any pcap files"""
+    for root, _, files in os.walk(directory):
+        for file in files:
+            if file.lower().endswith(('.pcap', '.pcapng')):
+                return True
+    return False
+
+def dataset_extract(model, pcap_path=PCAP_PATH, dataset_save_path=DATASET_SAVE_PATH, 
+                   samples=DEFAULT_SAMPLES, features=DEFAULT_FEATURES, 
+                   dataset_level=DEFAULT_DATASET_LEVEL):
+    """Extract dataset for model training"""
+    
+    # Ensure directories exist
+    ensure_directories()
+    
+    # Check if pcap files exist
+    if not check_pcap_files(pcap_path):
+        print(f"No pcap files found in {pcap_path}")
+        print("Please place your pcap files in the directory first.")
+        return None, None
+
     X_dataset = {}
     Y_dataset = {}
 
     try:
-        if os.listdir(dataset_save_path + "dataset\\"):
-            print("Reading dataset from %s ..." % (dataset_save_path + "dataset\\"))
+        dataset_dir = os.path.join(dataset_save_path, "dataset")
+        if os.path.exists(dataset_dir) and os.listdir(dataset_dir):
+            print(f"Reading dataset from {dataset_dir} ...")
             
-            x_payload_train, x_payload_test, x_payload_valid,\
-            y_train, y_test, y_valid = \
-                np.load(dataset_save_path + "dataset\\x_datagram_train.npy",allow_pickle=True), np.load(dataset_save_path + "dataset\\x_datagram_test.npy",allow_pickle=True), np.load(dataset_save_path + "dataset\\x_datagram_valid.npy",allow_pickle=True),\
-                np.load(dataset_save_path + "dataset\\y_train.npy",allow_pickle=True), np.load(dataset_save_path + "dataset\\y_test.npy",allow_pickle=True), np.load(dataset_save_path + "dataset\\y_valid.npy",allow_pickle=True)
+            # Load numpy arrays
+            data_files = {
+                'x_train': 'x_datagram_train.npy',
+                'x_test': 'x_datagram_test.npy',
+                'x_valid': 'x_datagram_valid.npy',
+                'y_train': 'y_train.npy',
+                'y_test': 'y_test.npy',
+                'y_valid': 'y_valid.npy'
+            }
             
-            X_dataset, Y_dataset = models_deal(model, X_dataset, Y_dataset,
-                                               x_payload_train, x_payload_test,
-                                               x_payload_valid,
-                                               y_train, y_test, y_valid)
+            loaded_data = {}
+            for key, filename in data_files.items():
+                file_path = os.path.join(dataset_dir, filename)
+                loaded_data[key] = np.load(file_path, allow_pickle=True)
+            
+            X_dataset, Y_dataset = models_deal(
+                model, X_dataset, Y_dataset,
+                loaded_data['x_train'], loaded_data['x_test'], loaded_data['x_valid'],
+                loaded_data['y_train'], loaded_data['y_test'], loaded_data['y_valid']
+            )
 
             return X_dataset, Y_dataset
     except Exception as e:
-        print(e)
-        print("Dataset directory %s not exist.\nBegin to obtain new dataset."%(dataset_save_path + "dataset\\"))
+        print(f"Error reading dataset: {str(e)}")
+        print(f"Dataset directory {dataset_dir} not exist.\nBegin to obtain new dataset.")
 
-    X,Y = dataset_generation.generation(pcap_path, samples, features, splitcap=False, dataset_save_path=dataset_save_path,dataset_level=dataset_level)
+    # Create record file directory
+    record_dir = os.path.dirname(os.path.join(dataset_save_path, "picked_file_record"))
+    os.makedirs(record_dir, exist_ok=True)
+
+    X, Y = dataset_generation.generation(
+        pcap_path=pcap_path,
+        samples=samples,
+        features=features,
+        splitcap=IF_SPLIT_PCAP,
+        dataset_save_path=dataset_save_path,
+        dataset_level=dataset_level
+    )
 
     dataset_statistic = [0] * _category
 
@@ -96,26 +165,27 @@ def dataset_extract(model):
         x_payload_valid, y_valid = x_payload_test[valid_index], y_test[valid_index]
         x_payload_test, y_test = x_payload_test[test_index], y_test[test_index]
 
-    if not os.path.exists(dataset_save_path+"dataset\\"):
-        os.mkdir(dataset_save_path+"dataset\\")
+    # Create dataset directory
+    dataset_dir = os.path.join(dataset_save_path, "dataset")
+    os.makedirs(dataset_dir, exist_ok=True)
 
-    output_x_payload_train = os.path.join(dataset_save_path + "dataset\\", 'x_datagram_train.npy')
+    # Define output paths
+    output_paths = {
+        'x_train': os.path.join(dataset_dir, 'x_datagram_train.npy'),
+        'x_test': os.path.join(dataset_dir, 'x_datagram_test.npy'),
+        'x_valid': os.path.join(dataset_dir, 'x_datagram_valid.npy'),
+        'y_train': os.path.join(dataset_dir, 'y_train.npy'),
+        'y_test': os.path.join(dataset_dir, 'y_test.npy'),
+        'y_valid': os.path.join(dataset_dir, 'y_valid.npy')
+    }
 
-    output_x_payload_test = os.path.join(dataset_save_path + "dataset\\", 'x_datagram_test.npy')
-
-    output_x_payload_valid = os.path.join(dataset_save_path + "dataset\\", 'x_datagram_valid.npy')
-
-    output_y_train = os.path.join(dataset_save_path+"dataset\\",'y_train.npy')
-    output_y_test = os.path.join(dataset_save_path + "dataset\\", 'y_test.npy')
-    output_y_valid = os.path.join(dataset_save_path + "dataset\\", 'y_valid.npy')
-
-    np.save(output_x_payload_train, x_payload_train)
-    np.save(output_x_payload_test, x_payload_test)
-    np.save(output_x_payload_valid, x_payload_valid)
-
-    np.save(output_y_train, y_train)
-    np.save(output_y_test, y_test)
-    np.save(output_y_valid, y_valid)
+    # Save data
+    np.save(output_paths['x_train'], x_payload_train)
+    np.save(output_paths['x_test'], x_payload_test)
+    np.save(output_paths['x_valid'], x_payload_valid)
+    np.save(output_paths['y_train'], y_train)
+    np.save(output_paths['y_test'], y_test)
+    np.save(output_paths['y_valid'], y_valid)
 
     X_dataset, Y_dataset = models_deal(model, X_dataset, Y_dataset,
                                        x_payload_train, x_payload_test, x_payload_valid,
@@ -125,18 +195,18 @@ def dataset_extract(model):
 
 def models_deal(model, X_dataset, Y_dataset, x_payload_train, x_payload_test, x_payload_valid, y_train, y_test, y_valid):
     for index in range(len(model)):
-        print("Begin to model %s dealing..."%model[index])
+        print(f"Begin to model {model[index]} dealing...")
         x_train_dataset = []
         x_test_dataset = []
         x_valid_dataset = []
 
         if model[index] == "pre-train":
-            save_dir = dataset_dir
+            save_dir = DATASETS_DIR
             write_dataset_tsv(x_payload_train, y_train, save_dir, "train")
             write_dataset_tsv(x_payload_test, y_test, save_dir, "test")
             write_dataset_tsv(x_payload_valid, y_valid, save_dir, "valid")
-            print("finish generating pre-train's datagram dataset.\nPlease check in %s" % save_dir)
-            unlabel_data(dataset_dir + "test_dataset.tsv")
+            print(f"finish generating pre-train's datagram dataset.\nPlease check in {save_dir}")
+            unlabel_data(os.path.join(save_dir, "test_dataset.tsv"))
 
         X_dataset[model[index]] = {"train": [], "valid": [], "test": []}
         Y_dataset[model[index]] = {"train": [], "valid": [], "test": []}
@@ -147,11 +217,14 @@ def models_deal(model, X_dataset, Y_dataset, x_payload_train, x_payload_test, x_
 
     return X_dataset, Y_dataset
 
-def write_dataset_tsv(data,label,file_dir,type):
+def write_dataset_tsv(data, label, file_dir, type):
+    """Write dataset to TSV file"""
     dataset_file = [["label", "text_a"]]
     for index in range(len(label)):
         dataset_file.append([label[index], data[index]])
-    with open(file_dir + type + "_dataset.tsv", 'w',newline='') as f:
+    
+    output_file = os.path.join(file_dir, f"{type}_dataset.tsv")
+    with open(output_file, 'w', newline='') as f:
         tsv_w = csv.writer(f, delimiter='\t')
         tsv_w.writerows(dataset_file)
     return 0
@@ -185,40 +258,65 @@ def pickle_save_data(path_file, data):
 def count_label_number(samples):
     new_samples = samples * _category
     
-    if 'splitcap' not in pcap_path:
-        dataset_length, labels = open_dataset_deal.statistic_dataset_sample_count(pcap_path + 'splitcap\\')
-    else:
-        dataset_length, labels = open_dataset_deal.statistic_dataset_sample_count(pcap_path)
+    splitcap_path = os.path.join(PCAP_PATH, 'splitcap') if 'splitcap' not in PCAP_PATH else PCAP_PATH
+    dataset_length, labels = open_dataset_deal.statistic_dataset_sample_count(splitcap_path)
 
     for index in range(len(dataset_length)):
         if dataset_length[index] < samples[0]:
-            print("label %s has less sample's number than defined samples %d" % (labels[index], samples[0]))
+            print(f"label {labels[index]} has less sample's number than defined samples {samples[0]}")
             new_samples[index] = dataset_length[index]
     return new_samples
 
 if __name__ == '__main__':
-    open_dataset_not_pcap = 0
+    # Configuration flags
+    open_dataset_not_pcap = False  # Convert pcapng to pcap
+    file2dir = True               # Generate category directories first
+    splitcap_finish = False       # Initialize sample number array
+    ml_experiment = False         # Machine learning experiment flag
     
+    print("Current configuration:")
+    print(f"PCAP_PATH: {PCAP_PATH}")
+    print(f"DATASET_SAVE_PATH: {DATASET_SAVE_PATH}")
+    print(f"Dataset level: {DEFAULT_DATASET_LEVEL}")
+    print(f"Sample size: {DEFAULT_SAMPLES[0]}")
+    
+    # Ensure all necessary directories exist
+    ensure_directories()
+    
+    # Check if source directory has pcap files
+    if not check_pcap_files(PCAP_PATH):
+        print(f"\nNo pcap files found in {PCAP_PATH}")
+        print("Please add your pcap files first.")
+        sys.exit(1)
+    
+    # Process based on flags
     if open_dataset_not_pcap:
-        #open_dataset_deal.dataset_file2dir(pcap_path)
-        for p,d,f in os.walk(pcap_path):
-            for file in f:
-                target_file = file.replace('.','_new.')
-                open_dataset_deal.file_2_pcap(p+"\\"+file, p+"\\"+target_file)
-                if '_new.pcap' not in file:
-                    os.remove(p+"\\"+file)
+        print("Converting non-pcap files to pcap format...")
+        for p, d, f in os.walk(PCAP_PATH):
+            for file in tqdm.tqdm(f, desc="Converting files"):
+                if not file.lower().endswith('.pcap'):
+                    target_file = file.replace('.', '_new.')
+                    source_path = os.path.join(p, file)
+                    target_path = os.path.join(p, target_file)
+                    open_dataset_deal.file_2_pcap(source_path, target_path)
+                    if '_new.pcap' not in file:
+                        os.remove(source_path)
 
-    file2dir = 0
     if file2dir:
-        open_dataset_deal.dataset_file2dir(pcap_path)
+        print("Organizing files into directories...")
+        open_dataset_deal.dataset_file2dir(PCAP_PATH)
 
-    splitcap_finish = 0
-    if splitcap_finish:
-        samples = count_label_number(samples)
-    else:
-        samples = samples * _category
+    # Calculate samples based on splitcap status
+    samples = count_label_number(DEFAULT_SAMPLES) if splitcap_finish else [DEFAULT_SAMPLES[0]] * _category
 
+    # Model training
     train_model = ["pre-train"]
-    ml_experiment = 0
-
-    dataset_extract(train_model)
+    print("\nStarting dataset extraction...")
+    dataset_extract(
+        model=train_model,
+        pcap_path=PCAP_PATH,
+        dataset_save_path=DATASET_SAVE_PATH,
+        samples=samples,
+        features=DEFAULT_FEATURES,
+        dataset_level=DEFAULT_DATASET_LEVEL
+    )

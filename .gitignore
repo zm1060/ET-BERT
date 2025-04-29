@@ -1,0 +1,17 @@
+*.bin
+*.pcap
+*.pyc
+*.pt
+*.txt
+*.json
+*.csv
+*.jsonl
+*.jsonl.gz
+*.npy
+*.zip
+*.pcap
+*.tsv
+models/
+datasets/
+corpora/
+uer/

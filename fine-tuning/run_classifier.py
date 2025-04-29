@@ -17,6 +17,7 @@ from uer.model_saver import save_model
 from uer.opts import finetune_opts
 import tqdm
 import numpy as np
+import os
 
 class Classifier(nn.Module):
     def __init__(self, args):
@@ -224,7 +225,11 @@ def evaluate(args, dataset, print_confusion_matrix=False):
         print("Confusion matrix:")
         print(confusion)
         cf_array = confusion.numpy()
-        with open("/data2/lxj/pre-train/results/confusion_matrix",'w') as f:
+        dataset_name = os.path.basename(os.path.dirname(args.train_path))
+        results_dir = os.path.join(os.path.dirname(os.path.dirname(args.train_path)), dataset_name, "results")
+        os.makedirs(results_dir, exist_ok=True)
+        confusion_matrix_path = os.path.join(results_dir, "confusion_matrix.txt")
+        with open(confusion_matrix_path, 'w') as f:
             for cf_a in cf_array:
                 f.write(str(cf_a)+'\n')
         print("Report precision, recall, and f1:")
