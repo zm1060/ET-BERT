@@ -211,9 +211,23 @@ class Dataset(object):
                     continue
                 tokens = self.tokenizer.tokenize(line.strip())
                 if len(tokens) > 0:
-                    dataset.append(tokens)
+                    # Convert tokens to ids
+                    src = [self.vocab.get(CLS_TOKEN)] + \
+                          [self.vocab.get(t) for t in tokens] + \
+                          [self.vocab.get(SEP_TOKEN)]
+                    seg_pos = [len(src)]
+                    
+                    if len(src) <= self.seq_length:
+                        # Apply masking
+                        src_masked, tgt_mlm = mask_seq(src, self.tokenizer, False, False, 0.0, 0)
+                        # Pad sequence
+                        while len(src_masked) < self.seq_length:
+                            src_masked.append(PAD_ID)
+                        # Create instance
+                        instance = (src_masked, tgt_mlm, 0, [seg_pos[0]] + [seg_pos[0]])
+                        dataset.append(instance)
         
-        # Save dataset with progress information
+        # Save dataset
         print(f"\nSaving dataset to {self.dataset_path}...")
         torch.save(dataset, self.dataset_path)
         print(f"✓ Dataset saved successfully. Total sequences: {len(dataset):,}")
@@ -360,95 +374,83 @@ class BertDataset(Dataset):
 
 class DataLoader(object):
     def __init__(self, args, dataset_path, batch_size, proc_id, proc_num, shuffle=False):
-        self.tokenizer = args.tokenizer
+        print("Loading dataset...")
+        self.dataset = torch.load(dataset_path)
+        print(f"Dataset loaded, size: {len(self.dataset)}")
         self.batch_size = batch_size
-        self.instances_buffer_size = args.instances_buffer_size
-        self.proc_id = proc_id
-        self.proc_num = proc_num
         self.shuffle = shuffle
-        self.dataset_reader = open(dataset_path, "rb")
-        self.read_count = 0
-        self.start = 0
-        self.end = 0
-        self.buffer = []
-        self.vocab = args.vocab
+        self.current_pos = 0
+        self.epoch = 0
+        
+    def __iter__(self):
+        return self
+        
+    def __next__(self):
+        if self.current_pos >= len(self.dataset):
+            self.current_pos = 0
+            self.epoch += 1
+            if self.shuffle:
+                random.shuffle(self.dataset)
+            print(f"Starting epoch {self.epoch}")
+            
+        end_pos = min(self.current_pos + self.batch_size, len(self.dataset))
+        batch = self.dataset[self.current_pos:end_pos]
+        self.current_pos = end_pos
+        
+        if len(batch) == 0:
+            raise StopIteration
+            
+        return self.process_batch(batch)
+        
+    def process_batch(self, batch):
+        raise NotImplementedError
+
+
+class BertDataLoader(DataLoader):
+    def __init__(self, args, dataset_path, batch_size, proc_id, proc_num, shuffle=False):
+        super(BertDataLoader, self).__init__(args, dataset_path, batch_size, proc_id, proc_num, shuffle)
+        self.tokenizer = args.tokenizer
         self.whole_word_masking = args.whole_word_masking
         self.span_masking = args.span_masking
         self.span_geo_prob = args.span_geo_prob
         self.span_max_length = args.span_max_length
-
-    def _fill_buf(self):
-        try:
-            self.buffer = []
-            while True:
-                instance = pickle.load(self.dataset_reader)
-                self.read_count += 1
-                if (self.read_count - 1) % self.proc_num == self.proc_id:
-                    self.buffer.append(instance)
-                    if len(self.buffer) >= self.instances_buffer_size:
-                        break
-        except EOFError:
-            # Reach file end.
-            self.dataset_reader.seek(0)
-
-        if self.shuffle:
-            random.shuffle(self.buffer)
-        self.start = 0
-        self.end = len(self.buffer)
-
-    def _empty(self):
-        return self.start >= self.end
-
-    def __del__(self):
-        self.dataset_reader.close()
-
+        print("BertDataLoader initialized")
         
-
-class BertDataLoader(DataLoader):
-    def __iter__(self):
-        while True:
-            while self._empty():
-                self._fill_buf()
-            if self.start + self.batch_size >= self.end:
-                instances = self.buffer[self.start:]
-            else:
-                instances = self.buffer[self.start: self.start + self.batch_size]
-
-            self.start += self.batch_size
-
-            src = []
-            tgt_mlm = []
-            is_next = []
-            seg = []
-
-            masked_words_num = 0
-
+    def process_batch(self, instances):
+        print(f"Processing batch of size {len(instances)}")
+        src = []
+        tgt_mlm = []
+        is_next = []
+        seg = []
+        
+        masked_words_num = 0
+        
+        try:
             for ins in instances:
-                if len(ins) == 4:
-                    src.append(ins[0])
-                    masked_words_num += len(ins[1])
-                    tgt_mlm.append([0] * len(ins[0]))
-                    for mask in ins[1]:
-                        tgt_mlm[-1][mask[0]] = mask[1]
-                    is_next.append(ins[2])
-                    seg.append([1] * ins[3][0] + [2] * (ins[3][1] - ins[3][0]) + [PAD_ID] * (len(ins[0]) - ins[3][1]))
-                else:
-                    src_single, tgt_mlm_single = mask_seq(ins[0], self.tokenizer, self.whole_word_masking, self.span_masking, self.span_geo_prob, self.span_max_length)
-                    masked_words_num += len(tgt_mlm_single)
-                    src.append(src_single)
-                    tgt_mlm.append([0] * len(ins[0]))
-                    for mask in tgt_mlm_single:
-                        tgt_mlm[-1][mask[0]] = mask[1]
-                    is_next.append(ins[1])
-                    seg.append([1] * ins[2][0] + [2] * (ins[2][1] - ins[2][0]) + [PAD_ID] * (len(ins[0]) - ins[2][1]))
-
-            if masked_words_num == 0:
-                continue
-
-            yield torch.LongTensor(src), \
-                torch.LongTensor(tgt_mlm), \
-                torch.LongTensor(is_next), \
-                torch.LongTensor(seg)
+                src.append(ins[0])
+                masked_words_num += len(ins[1])
+                tgt = [0] * len(ins[0])
+                for mask in ins[1]:
+                    tgt[mask[0]] = mask[1]
+                tgt_mlm.append(tgt)
+                is_next.append(ins[2])
+                seg.append([1] * ins[3][0] + [2] * (ins[3][1] - ins[3][0]) + [PAD_ID] * (len(ins[0]) - ins[3][1]))
+        except Exception as e:
+            print(f"Error processing instance: {e}")
+            print(f"Instance data: {ins}")
+            raise
+            
+        if masked_words_num == 0:
+            print("No masked words in batch")
+            return self.__next__()
+            
+        print("Creating tensors...")
+        return (
+            torch.LongTensor(src),
+            torch.LongTensor(tgt_mlm),
+            torch.LongTensor(is_next),
+            torch.LongTensor(seg)
+        )
 
 
 class MlmDataset(Dataset):
@@ -513,32 +515,86 @@ class MlmDataset(Dataset):
 
     def build_instances(self, all_documents):
         instances = []
-        instances_num = len(all_documents) // self.seq_length
-        for i in range(instances_num):
-            src = all_documents[i * self.seq_length: (i + 1) * self.seq_length]
-            seg_pos = [len(src)]
+        for _ in range(self.dup_factor):
+            for doc_index in range(len(all_documents)):
+                instances.extend(self.create_ins_from_doc(all_documents, doc_index))
+        return instances
 
-            if not self.dynamic_masking:
-                src, tgt = mask_seq(src, self.tokenizer, self.whole_word_masking, self.span_masking, self.span_geo_prob, self.span_max_length)
-                instance = (src, tgt, seg_pos)
-            else:
-                instance = (src, seg_pos)
+    def create_ins_from_doc(self, all_documents, document_index):
+        document = all_documents[document_index]
+        max_num_tokens = self.seq_length - 3
+        target_seq_length = max_num_tokens
+        if random.random() < self.short_seq_prob:
+            target_seq_length = random.randint(2, max_num_tokens)
+        instances = []
+        current_chunk = []
+        current_length = 0
+        i = 0
+        while i < len(document):
+            segment = document[i]
+            current_chunk.append(segment)
+            current_length += len(segment)
+            if i == len(document) - 1 or current_length >= target_seq_length:
+                if current_chunk:
+                    a_end = 1
+                    if len(current_chunk) >= 2:
+                        a_end = random.randint(1, len(current_chunk) - 1)
 
-            instances.append(instance)
+                    tokens_a = []
+                    for j in range(a_end):
+                        tokens_a.extend(current_chunk[j])
 
-        src = all_documents[instances_num * self.seq_length:]
-        seg_pos = [len(src)]
+                    tokens_b = []
+                    is_random_next = 0
 
-        while len(src) != self.seq_length:
-            src.append(PAD_ID)
+                    if len(current_chunk) == 1 or random.random() < 0.5:
+                        is_random_next = 1
+                        target_b_length = target_seq_length - len(tokens_a)
 
-        if not self.dynamic_masking:
-            src, tgt = mask_seq(src, self.tokenizer, self.whole_word_masking, self.span_masking, self.span_geo_prob, self.span_max_length)
-            instance = (src, tgt, seg_pos)
-        else:
-            instance = (src, seg_pos)
+                        for _ in range(10):
+                            random_document_index = random.randint(0, len(all_documents) - 1)
+                            if random_document_index != document_index:
+                                break
 
-        instances.append(instance)
+                        random_document = all_documents[random_document_index]
+                        random_start = random.randint(0, len(random_document) - 1)
+                        for j in range(random_start, len(random_document)):
+                            tokens_b.extend(random_document[j])
+                            if len(tokens_b) >= target_b_length:
+                                break
+
+                        num_unused_segments = len(current_chunk) - a_end
+                        i -= num_unused_segments
+
+                    else:
+                        is_random_next = 0
+                        for j in range(a_end, len(current_chunk)):
+                            tokens_b.extend(current_chunk[j])
+
+                    truncate_seq_pair(tokens_a, tokens_b, max_num_tokens)
+
+                    src = []
+                    src.append(self.vocab.get(CLS_TOKEN))
+                    src.extend(tokens_a)
+                    src.append(self.vocab.get(SEP_TOKEN))
+                    seg_pos = [len(src)]
+                    src.extend(tokens_b)
+                    src.append(self.vocab.get(SEP_TOKEN))
+                    seg_pos.append(len(src))
+
+                    while len(src) != self.seq_length:
+                        src.append(PAD_ID)
+
+                    if not self.dynamic_masking:
+                        src, tgt_mlm = mask_seq(src, self.tokenizer, self.whole_word_masking, self.span_masking, self.span_geo_prob, self.span_max_length)
+                        instance = (src, tgt_mlm, is_random_next, seg_pos)
+                    else:
+                        instance = (src, is_random_next, seg_pos)
+
+                    instances.append(instance)
+                current_chunk = []
+                current_length = 0
+            i += 1
         return instances
 
 

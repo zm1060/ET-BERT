@@ -80,6 +80,14 @@ class Trainer(object):
         self.dist_train = args.dist_train
         self.batch_size = args.batch_size
         self.world_size = args.world_size
+        
+        # Add progress bar
+        try:
+            from tqdm import tqdm
+            self.pbar = tqdm(total=args.total_steps, desc="Training", 
+                           unit="steps", dynamic_ncols=True)
+        except ImportError:
+            self.pbar = None
 
     def forward_propagation(self, batch, model):
 
@@ -90,40 +98,58 @@ class Trainer(object):
         raise NotImplementedError
 
     def train(self, args, gpu_id, rank, loader, model, optimizer, scheduler):
+        print("Starting training loop...")
         model.train()
-        loader_iter = iter(loader)
-        while True:
-            if self.current_step == self.total_steps + 1:
-                break
-            batch = list(next(loader_iter))
-            self.seq_length = batch[0].size(1)
-            if gpu_id is not None:
-                for i in range(len(batch)):
-                    batch[i] = batch[i].cuda(gpu_id)
+        
+        while self.current_step <= self.total_steps:
+            try:
+                print(f"\nStep {self.current_step}: Getting next batch...")
+                batch = next(loader)
+                print(f"Batch received, shapes: {[b.shape for b in batch]}")
+                
+                if gpu_id is not None:
+                    batch = [b.cuda(gpu_id) for b in batch]
+                    print("Batch moved to GPU")
 
-            loss = self.forward_propagation(batch, model)
+                print("Running forward pass...")
+                loss = self.forward_propagation(batch, model)
+                print(f"Forward pass complete, loss: {loss.item()}")
 
-            if args.fp16:
-                with args.amp.scale_loss(loss, optimizer) as scaled_loss:
-                    scaled_loss.backward()
-            else:
-                loss.backward()
+                print("Running backward pass...")
+                if args.fp16:
+                    with args.amp.scale_loss(loss, optimizer) as scaled_loss:
+                        scaled_loss.backward()
+                else:
+                    loss.backward()
+                print("Backward pass complete")
 
-            if self.current_step % self.accumulation_steps == 0:
-                optimizer.step()
-                scheduler.step()
-                model.zero_grad()
+                if self.current_step % self.accumulation_steps == 0:
+                    print("Updating parameters...")
+                    optimizer.step()
+                    scheduler.step()
+                    model.zero_grad()
+                    print("Parameters updated")
 
-            if self.current_step % self.report_steps == 0 and \
-                    (not self.dist_train or (self.dist_train and rank == 0)):
-                self.report_and_reset_stats()
-                self.start_time = time.time()
+                if self.current_step % self.report_steps == 0 and \
+                        (not self.dist_train or (self.dist_train and rank == 0)):
+                    self.report_and_reset_stats()
+                    self.start_time = time.time()
 
-            if self.current_step % self.save_checkpoint_steps == 0 and \
-                    (not self.dist_train or (self.dist_train and rank == 0)):
-                save_model(model, self.output_model_path + "-" + str(self.current_step))
+                if self.current_step % self.save_checkpoint_steps == 0 and \
+                        (not self.dist_train or (self.dist_train and rank == 0)):
+                    save_model(model, self.output_model_path + "-" + str(self.current_step))
 
-            self.current_step += 1
+                if self.pbar and (not self.dist_train or (self.dist_train and rank == 0)):
+                    self.pbar.update(1)
+                    
+                self.current_step += 1
+                
+            except Exception as e:
+                print(f"Error in training loop: {str(e)}")
+                raise
+                
+        if self.pbar:
+            self.pbar.close()
 
 
 class MlmTrainer(Trainer):
