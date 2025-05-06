@@ -89,8 +89,8 @@ PYTHONPATH=. python3 pre-training/pretrain.py \
     --dataset_path dataset.pt \
     --vocab_path models/encryptd_vocab.txt \
     --output_model_path models/pre-trained_model.bin \
-    --world_size 8 \
-    --gpu_ranks 0 1 2 3 4 5 6 7 \
+    --world_size 1 \
+    --gpu_ranks 0 \
     --total_steps 500000 \
     --save_checkpoint_steps 10000 \
     --batch_size 32 \

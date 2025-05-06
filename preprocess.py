@@ -3,6 +3,8 @@ import six
 from packaging import version
 from uer.utils.data import *
 from uer.utils import *
+from tqdm import tqdm
+import os
 
 assert version.parse(six.__version__) >= version.parse("1.12.0")
 
@@ -61,18 +63,41 @@ def main():
 
     args = parser.parse_args()
 
+    # Print preprocessing information
+    print("\nPreprocessing configurations:")
+    print(f"Corpus path: {args.corpus_path}")
+    print(f"Vocab path: {args.vocab_path}")
+    print(f"Output dataset path: {args.dataset_path}")
+    print(f"Tokenizer: {args.tokenizer}")
+    print(f"Number of processes: {args.processes_num}")
+    print(f"Sequence length: {args.seq_length}")
+    print(f"Target: {args.target}\n")
+
+    # Check if input files exist
+    if not os.path.exists(args.corpus_path):
+        raise FileNotFoundError(f"Corpus file not found: {args.corpus_path}")
+    if args.vocab_path and not os.path.exists(args.vocab_path):
+        raise FileNotFoundError(f"Vocabulary file not found: {args.vocab_path}")
+
     # Dynamic masking.
     if args.dynamic_masking:
         args.dup_factor = 1
 
+    print("Building tokenizer...")
     # Build tokenizer.
     tokenizer = str2tokenizer[args.tokenizer](args)
     if args.target == "seq2seq":
         args.tgt_tokenizer = str2tokenizer[args.tgt_tokenizer](args, False)
+    print("Tokenizer built successfully.")
 
     # Build and save dataset.
+    print("\nBuilding dataset...")
     dataset = str2dataset[args.target](args, tokenizer.vocab, tokenizer)
+    
+    print(f"\nProcessing data with {args.processes_num} processes...")
     dataset.build_and_save(args.processes_num)
+    
+    print(f"\nPreprocessing completed. Dataset saved to {args.dataset_path}")
 
 
 if __name__ == "__main__":

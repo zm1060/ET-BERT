@@ -7,7 +7,7 @@ from uer.utils.constants import *
 from uer.utils.tokenizers import *
 from uer.utils.misc import count_lines
 from uer.utils.seed import set_seed
-
+from tqdm import tqdm
 
 def mask_seq(src, tokenizer, whole_word_masking, span_masking, span_geo_prob, span_max_length):
     vocab = tokenizer.vocab
@@ -190,95 +190,46 @@ class Dataset(object):
         self.dataset_path = args.dataset_path
         self.seq_length = args.seq_length
         self.seed = args.seed
-        self.dynamic_masking = args.dynamic_masking
-        self.whole_word_masking = args.whole_word_masking
-        self.span_masking = args.span_masking
-        self.span_geo_prob = args.span_geo_prob
-        self.span_max_length = args.span_max_length
-        self.docs_buffer_size = args.docs_buffer_size
+        self.processes_num = args.processes_num
         self.dup_factor = args.dup_factor
 
-    def build_and_save(self, workers_num):
-        """
-        Build dataset from the given corpus.
-        Start workers_num processes and each process deals with a part of data.
-        """
-        lines_num = count_lines(self.corpus_path)
-        print("Starting %d workers for building datasets ... " % workers_num)
-        assert (workers_num >= 1)
-        if workers_num == 1:
-            self.worker(0, 0, lines_num)
-        else:
-            pool = Pool(workers_num)
-            for i in range(workers_num):
-                start = i * lines_num // workers_num
-                end = (i + 1) * lines_num // workers_num
-                pool.apply_async(func=self.worker, args=[i, start, end])
-            pool.close()
-            pool.join()
-
-        # Merge datasets.
-        merge_dataset(self.dataset_path, workers_num)
-
-    def worker(self, proc_id, start, end):
-        raise NotImplementedError()
-
-
-class DataLoader(object):
-    def __init__(self, args, dataset_path, batch_size, proc_id, proc_num, shuffle=False):
-        self.tokenizer = args.tokenizer
-        self.batch_size = batch_size
-        self.instances_buffer_size = args.instances_buffer_size
-        self.proc_id = proc_id
-        self.proc_num = proc_num
-        self.shuffle = shuffle
-        self.dataset_reader = open(dataset_path, "rb")
-        self.read_count = 0
-        self.start = 0
-        self.end = 0
-        self.buffer = []
-        self.vocab = args.vocab
-        self.whole_word_masking = args.whole_word_masking
-        self.span_masking = args.span_masking
-        self.span_geo_prob = args.span_geo_prob
-        self.span_max_length = args.span_max_length
-
-    def _fill_buf(self):
-        try:
-            self.buffer = []
-            while True:
-                instance = pickle.load(self.dataset_reader)
-                self.read_count += 1
-                if (self.read_count - 1) % self.proc_num == self.proc_id:
-                    self.buffer.append(instance)
-                    if len(self.buffer) >= self.instances_buffer_size:
-                        break
-        except EOFError:
-            # Reach file end.
-            self.dataset_reader.seek(0)
-
-        if self.shuffle:
-            random.shuffle(self.buffer)
-        self.start = 0
-        self.end = len(self.buffer)
-
-    def _empty(self):
-        return self.start >= self.end
-
-    def __del__(self):
-        self.dataset_reader.close()
+    def build_and_save(self, processes_num):
+        """Build dataset from the given corpus."""
+        
+        # Count total lines for progress bar
+        print("Counting total lines in corpus...")
+        with open(self.corpus_path, 'r', encoding='utf-8') as f:
+            total_lines = sum(1 for _ in f)
+        print(f"Total lines: {total_lines:,}")
+        
+        # Process corpus file with progress bar
+        print("\nProcessing corpus file...")
+        dataset = []
+        with open(self.corpus_path, 'r', encoding='utf-8') as f:
+            for line in tqdm(f, total=total_lines, desc="Building dataset"):
+                if not line.strip():
+                    continue
+                tokens = self.tokenizer.tokenize(line.strip())
+                if len(tokens) > 0:
+                    dataset.append(tokens)
+        
+        # Save dataset with progress information
+        print(f"\nSaving dataset to {self.dataset_path}...")
+        torch.save(dataset, self.dataset_path)
+        print(f"✓ Dataset saved successfully. Total sequences: {len(dataset):,}")
+        return dataset
 
 
 class BertDataset(Dataset):
     """
     Construct dataset for MLM and NSP tasks from the given corpus.
-    Each document consists of multiple sentences,
-    and each sentence occupies a single line.
-    Documents in corpus must be separated by empty lines.
+    Each document consists of multiple sentences, 
+    and each sentence consists of multiple tokens.
     """
-
     def __init__(self, args, vocab, tokenizer):
         super(BertDataset, self).__init__(args, vocab, tokenizer)
+        self.docs_buffer_size = args.docs_buffer_size
+        self.dup_factor = args.dup_factor
         self.short_seq_prob = args.short_seq_prob
 
     def worker(self, proc_id, start, end):
@@ -406,6 +357,52 @@ class BertDataset(Dataset):
             i += 1
         return instances
 
+
+class DataLoader(object):
+    def __init__(self, args, dataset_path, batch_size, proc_id, proc_num, shuffle=False):
+        self.tokenizer = args.tokenizer
+        self.batch_size = batch_size
+        self.instances_buffer_size = args.instances_buffer_size
+        self.proc_id = proc_id
+        self.proc_num = proc_num
+        self.shuffle = shuffle
+        self.dataset_reader = open(dataset_path, "rb")
+        self.read_count = 0
+        self.start = 0
+        self.end = 0
+        self.buffer = []
+        self.vocab = args.vocab
+        self.whole_word_masking = args.whole_word_masking
+        self.span_masking = args.span_masking
+        self.span_geo_prob = args.span_geo_prob
+        self.span_max_length = args.span_max_length
+
+    def _fill_buf(self):
+        try:
+            self.buffer = []
+            while True:
+                instance = pickle.load(self.dataset_reader)
+                self.read_count += 1
+                if (self.read_count - 1) % self.proc_num == self.proc_id:
+                    self.buffer.append(instance)
+                    if len(self.buffer) >= self.instances_buffer_size:
+                        break
+        except EOFError:
+            # Reach file end.
+            self.dataset_reader.seek(0)
+
+        if self.shuffle:
+            random.shuffle(self.buffer)
+        self.start = 0
+        self.end = len(self.buffer)
+
+    def _empty(self):
+        return self.start >= self.end
+
+    def __del__(self):
+        self.dataset_reader.close()
+
+        
 
 class BertDataLoader(DataLoader):
     def __iter__(self):
@@ -1157,4 +1154,5 @@ class PrefixlmDataLoader(DataLoader):
             yield torch.LongTensor(src), \
                 torch.LongTensor(tgt), \
                 torch.LongTensor(seg)
+
 
